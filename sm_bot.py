@@ -171,10 +171,12 @@ class Makmik:
                 pass
 
     def login(self):
+        email = os.environ["MAKMIK_EMAIL"].strip()
+        pwd = os.environ["MAKMIK_PASSWORD"].strip()
         r = self.s.post(
             f"{BASE}/api/AccountApi/Login",
-            data={"email": os.environ["MAKMIK_EMAIL"], "pwd": os.environ["MAKMIK_PASSWORD"],
-                  "timezone": "0", "timezonename": TZ_NAME},
+            data={"email": email, "pwd": pwd,
+                  "timezone": "0", "timezonename": "Europe/London"},
             timeout=30,
         )
         r.raise_for_status()
@@ -182,15 +184,15 @@ class Makmik:
             body = r.json()
         except ValueError:
             body = {}
-        ok = body.get("isSuccess") is not False and body.get("status") not in ("Fail", "Error")
-        if not ok or not self.s.cookies:
-            raise RuntimeError(f"Login MAKMIK fallido: {str(body)[:200]}")
-        # diagnostico sin secretos: solo nombres de campos y de cookies
-        print("Login MAKMIK campos:", list(body.keys()) if isinstance(body, dict) else type(body).__name__,
-              "| data:", (list(body.get("data").keys()) if isinstance(body, dict) and isinstance(body.get("data"), dict)
-                          else type(body.get("data")).__name__ if isinstance(body, dict) else "-"),
-              "| cookies:", list(self.s.cookies.get_dict().keys()))
-        self.store.set("cookies", json.dumps(self.s.cookies.get_dict()))
+        cookies = self.s.cookies.get_dict()
+        status = body.get("status") if isinstance(body, dict) else None
+        msg = body.get("msg") if isinstance(body, dict) else None
+        # diagnostico sin secretos
+        print(f"Login MAKMIK -> status={status!r} msg={msg!r} cookies={list(cookies.keys())} "
+              f"(email de {len(email)} car., contrasena de {len(pwd)} car.)")
+        if "userInfo" not in cookies and str(status).lower() != "success":
+            raise RuntimeError(f"Login MAKMIK fallido: status={status!r} msg={msg!r}")
+        self.store.set("cookies", json.dumps(cookies))
         print("Login MAKMIK OK")
 
     def _json(self, r):
