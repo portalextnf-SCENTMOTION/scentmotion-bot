@@ -159,7 +159,10 @@ class Makmik:
         self.store = store
         self.s = requests.Session()
         self.s.headers.update({"User-Agent": UA, "Accept": "application/json, text/plain, */*",
-                               "Accept-Language": "es-ES,es;q=0.9"})
+                               "Accept-Language": "es-ES,es;q=0.9",
+                               "X-Requested-With": "XMLHttpRequest",
+                               "Origin": BASE,
+                               "Referer": f"{BASE}/client/mobile/index.html"})
         saved = store.get("cookies")
         if saved:
             try:
@@ -182,18 +185,29 @@ class Makmik:
         ok = body.get("isSuccess") is not False and body.get("status") not in ("Fail", "Error")
         if not ok or not self.s.cookies:
             raise RuntimeError(f"Login MAKMIK fallido: {str(body)[:200]}")
+        # diagnostico sin secretos: solo nombres de campos y de cookies
+        print("Login MAKMIK campos:", list(body.keys()) if isinstance(body, dict) else type(body).__name__,
+              "| data:", (list(body.get("data").keys()) if isinstance(body, dict) and isinstance(body.get("data"), dict)
+                          else type(body.get("data")).__name__ if isinstance(body, dict) else "-"),
+              "| cookies:", list(self.s.cookies.get_dict().keys()))
         self.store.set("cookies", json.dumps(self.s.cookies.get_dict()))
         print("Login MAKMIK OK")
 
     def _json(self, r):
-        if r.status_code in (401, 403) or r.url.rstrip("/").endswith("login"):
+        def why(reason):
+            req = getattr(r, "request", None)
+            hdrs = getattr(r, "headers", {}) or {}
+            print(f"[MAKMIK] {reason} | HTTP {r.status_code} | {getattr(req, 'method', '?')} "
+                  f"{str(r.url).split('?')[0]} | tipo {hdrs.get('Content-Type')} | respuesta: {r.text[:300]!r}")
             raise SessionExpired()
+        if r.status_code in (401, 403) or r.url.rstrip("/").endswith("login"):
+            why("sin permiso")
         try:
             body = r.json()
         except ValueError:
-            raise SessionExpired()  # devuelve HTML (pagina de login) -> sesion caducada
+            why("no es JSON")  # devuelve HTML (pagina de login) -> sesion caducada
         if isinstance(body, dict) and body.get("isSuccess") is False:
-            raise SessionExpired()
+            why("isSuccess=false")
         return body
 
     def _call(self, fn):
