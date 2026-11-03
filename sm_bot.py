@@ -57,13 +57,12 @@ PAYWAY = {
 class Store:
     def __init__(self):
         self.url = os.getenv("DATABASE_URL")
+        self.conn = None
         if self.url:
-            import psycopg  # noqa: import solo si se usa
-            self.conn = psycopg.connect(self.url, autocommit=True)
-            with self.conn.cursor() as c:
-                c.execute("CREATE TABLE IF NOT EXISTS sm_kv (k TEXT PRIMARY KEY, v TEXT)")
-                c.execute("CREATE TABLE IF NOT EXISTS sm_seen (order_no TEXT PRIMARY KEY,"
-                          " seen_at TIMESTAMPTZ DEFAULT now())")
+            self._connect()
+            self._q("CREATE TABLE IF NOT EXISTS sm_kv (k TEXT PRIMARY KEY, v TEXT)")
+            self._q("CREATE TABLE IF NOT EXISTS sm_seen (order_no TEXT PRIMARY KEY,"
+                    " seen_at TIMESTAMPTZ DEFAULT now())")
         else:
             self.path = os.getenv("STATE_FILE", "sm_state.json")
             try:
@@ -72,41 +71,69 @@ class Store:
             except (FileNotFoundError, json.JSONDecodeError):
                 self.data = {"kv": {}, "seen": []}
 
+    def _connect(self):
+        """Conecta con Neon. La base gratuita se "duerme" y a veces tarda en despertar
+        o corta la conexion: se reintenta unas veces antes de dar el fallo por bueno."""
+        import psycopg  # noqa: import solo si se usa
+        if self.conn is not None:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+        for intento in range(1, 5):
+            try:
+                self.conn = psycopg.connect(self.url, autocommit=True, connect_timeout=20)
+                return
+            except psycopg.OperationalError as e:
+                print(f"[base de datos] conexion, intento {intento} fallido: {str(e)[:200]}")
+                if intento == 4:
+                    raise
+                time.sleep(10 * intento)
+
+    def _q(self, sql, params=(), fetch=False):
+        """Ejecuta una consulta; si Neon cerro la conexion, reconecta y repite una vez."""
+        import psycopg  # noqa
+        for intento in (1, 2):
+            try:
+                with self.conn.cursor() as c:
+                    c.execute(sql, params)
+                    return c.fetchone() if fetch else None
+            except psycopg.OperationalError as e:
+                if intento == 2:
+                    raise
+                print(f"[base de datos] conexion cerrada ({str(e)[:120]}); reconectando")
+                self._connect()
+
     def _save(self):
         with open(self.path, "w") as f:
             json.dump(self.data, f)
 
     def get(self, k, default=None):
         if self.url:
-            with self.conn.cursor() as c:
-                c.execute("SELECT v FROM sm_kv WHERE k=%s", (k,))
-                r = c.fetchone()
-                return r[0] if r else default
+            r = self._q("SELECT v FROM sm_kv WHERE k=%s", (k,), fetch=True)
+            return r[0] if r else default
         return self.data["kv"].get(k, default)
 
     def set(self, k, v):
         if self.url:
-            with self.conn.cursor() as c:
-                c.execute("INSERT INTO sm_kv (k, v) VALUES (%s, %s) "
-                          "ON CONFLICT (k) DO UPDATE SET v=EXCLUDED.v", (k, v))
+            self._q("INSERT INTO sm_kv (k, v) VALUES (%s, %s) "
+                    "ON CONFLICT (k) DO UPDATE SET v=EXCLUDED.v", (k, v))
         else:
             self.data["kv"][k] = v
             self._save()
 
     def is_seen(self, order_no):
         if self.url:
-            with self.conn.cursor() as c:
-                c.execute("SELECT 1 FROM sm_seen WHERE order_no=%s", (order_no,))
-                return c.fetchone() is not None
+            return self._q("SELECT 1 FROM sm_seen WHERE order_no=%s", (order_no,),
+                           fetch=True) is not None
         return order_no in self.data["seen"]
 
     def mark_seen(self, order_no):
         if self.url:
-            with self.conn.cursor() as c:
-                c.execute("INSERT INTO sm_seen (order_no) VALUES (%s) "
-                          "ON CONFLICT DO NOTHING", (order_no,))
-                # limpieza: no hace falta recordar pedidos de hace mas de 10 dias
-                c.execute("DELETE FROM sm_seen WHERE seen_at < now() - interval '10 days'")
+            self._q("INSERT INTO sm_seen (order_no) VALUES (%s) ON CONFLICT DO NOTHING",
+                    (order_no,))
+            # limpieza: no hace falta recordar pedidos de hace mas de 10 dias
+            self._q("DELETE FROM sm_seen WHERE seen_at < now() - interval '10 days'")
         else:
             if order_no not in self.data["seen"]:
                 self.data["seen"].append(order_no)
@@ -413,7 +440,14 @@ def main():
             run_once()
             time.sleep(every)
     else:
-        run_once()
+        # Un fallo puntual de red (base de datos, plataforma o Telegram) no debe
+        # dar la pasada por fallida: se repite una vez tras una pausa.
+        try:
+            run_once()
+        except Exception as e:
+            print(f"[pasada] fallo, se reintenta en 30 s: {e!r}")
+            time.sleep(30)
+            run_once()
 
 
 if __name__ == "__main__":
