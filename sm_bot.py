@@ -20,7 +20,7 @@ Variables de entorno (en Render, como "Environment Variables"):
     DATABASE_URL       Postgres (Neon) para recordar estado  [recomendada]
     MACHINE_NUM        por defecto WSA2001806
     MACHINE_LABEL      por defecto "GF Fañabé"
-    SUMMARY_HOUR       hora del resumen diario, por defecto 22
+    SUMMARY_HOUR       hora (del dia siguiente) a partir de la que se envia el resumen del dia anterior; por defecto 0
     POLL_SECONDS       solo modo loop, por defecto 120
 """
 
@@ -41,7 +41,7 @@ UA = ("Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 "
 
 MACHINE_NUM = os.getenv("MACHINE_NUM", "WSA2001806")
 MACHINE_LABEL = os.getenv("MACHINE_LABEL", "GF Fañabé")
-SUMMARY_HOUR = int(os.getenv("SUMMARY_HOUR", "22"))
+SUMMARY_HOUR = int(os.getenv("SUMMARY_HOUR", "0"))  # 0 = justo despues de medianoche
 OFFLINE_CONFIRM_RUNS = 2  # pasadas seguidas offline antes de avisar (evita falsas alarmas)
 
 PAYWAY = {
@@ -396,12 +396,23 @@ def check_online(mk, store):
 
 
 def maybe_summary(mk, store, now, force=False):
-    key = now.date().isoformat()
-    if not force and (now.hour < SUMMARY_HOUR or store.get("summary_date") == key):
+    """Resumen del dia ANTERIOR completo (de 00:00 a 23:59), enviado en la primera
+    pasada despues de medianoche. Asi entran tambien las ventas de ultima hora."""
+    if force:  # modo manual "resumen": el dia de hoy hasta ahora
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        tg_send(summary_message(now, mk.orders(start, now)))
         return
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    orders = mk.orders(start, now)
-    tg_send(summary_message(now, orders))
+    if now.hour < SUMMARY_HOUR:
+        return
+    day = (now - dt.timedelta(days=1)).date()
+    key = day.isoformat()
+    if store.get("summary_date") == key:
+        return
+    start = dt.datetime.combine(day, dt.time(0, 0), tzinfo=TZ)
+    end = start + dt.timedelta(days=1)
+    orders = [o for o in mk.orders(start, end)
+              if (pay_time(o) or start).date() == day]
+    tg_send(summary_message(start, orders))
     store.set("summary_date", key)
 
 
